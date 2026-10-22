@@ -218,3 +218,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+/ai
+
+# --- Debate Studio ---
+node_modules/
+data/
+config/*.bak
+config/.*.tmp.*
+.debate_studio_bundle.tgz

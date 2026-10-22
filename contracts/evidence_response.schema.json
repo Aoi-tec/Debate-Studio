@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EvidenceResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "evidence_request_id",
+    "expected_version",
+    "action",
+    "idempotency_key"
+  ],
+  "properties": {
+    "evidence_request_id": {
+      "type": "string"
+    },
+    "expected_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "action": {
+      "enum": [
+        "file_upload",
+        "user_statement",
+        "unavailable",
+        "withdraw",
+        "continue_as_hypothesis",
+        "finish_with_unresolved"
+      ]
+    },
+    "file_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "statement": {
+      "type": "string"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

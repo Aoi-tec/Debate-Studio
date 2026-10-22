@@ -1,0 +1,9 @@
+{
+  "id": "alternative",
+  "name": "代替案担当",
+  "description": "別の実装ルート・費用・保守性を比較する",
+  "agent_file": "Agent.MD",
+  "capabilities": [
+    "text_debate"
+  ]
+}

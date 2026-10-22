@@ -1,0 +1,9 @@
+{
+  "id": "proposer",
+  "name": "提案担当",
+  "description": "実装可能な解決策・長短・前提を示す",
+  "agent_file": "Agent.MD",
+  "capabilities": [
+    "text_debate"
+  ]
+}

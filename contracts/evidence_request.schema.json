@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EvidenceRequest",
+  "description": "議長→ユーザーの資料不足差し戻し。v1.4.1: state enum を DESIGN 4.8.5 の全状態と DEFERRED の和集合に統一。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "evidence_request_id",
+    "session_id",
+    "origin_context_request_id",
+    "state",
+    "reason_code",
+    "criticality",
+    "question",
+    "why_needed",
+    "searched_sources",
+    "missing_fields",
+    "acceptable_inputs",
+    "impact_if_unresolved",
+    "created_at"
+  ],
+  "properties": {
+    "evidence_request_id": {
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "origin_context_request_id": {
+      "type": "string"
+    },
+    "state": {
+      "enum": [
+        "OPEN",
+        "SEARCHING",
+        "WAITING_USER_EVIDENCE",
+        "ANSWER_RECEIVED",
+        "REVALIDATING",
+        "RESOLVED",
+        "STILL_MISSING",
+        "DEFERRED",
+        "WITHDRAWN"
+      ]
+    },
+    "reason_code": {
+      "enum": [
+        "NOT_FOUND",
+        "UNREADABLE",
+        "CONFLICTING",
+        "ACCESS_DENIED",
+        "INSUFFICIENT_DETAIL",
+        "ANALYSIS_FAILED"
+      ]
+    },
+    "criticality": {
+      "enum": [
+        "critical",
+        "noncritical"
+      ]
+    },
+    "question": {
+      "type": "string",
+      "minLength": 1
+    },
+    "why_needed": {
+      "type": "string"
+    },
+    "searched_sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "file_id",
+          "scope"
+        ],
+        "properties": {
+          "file_id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "missing_fields": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "acceptable_inputs": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "file_upload",
+          "user_statement",
+          "unavailable",
+          "withdraw",
+          "continue_as_hypothesis",
+          "finish_with_unresolved"
+        ]
+      }
+    },
+    "impact_if_unresolved": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "evidence_request_id": "er_004",
+  "session_id": "s_001",
+  "origin_context_request_id": "cr_018",
+  "state": "WAITING_USER_EVIDENCE",
+  "reason_code": "NOT_FOUND",
+  "criticality": "critical",
+  "question": "部品単価表の適用開始日が分かる資料を追加してください。",
+  "why_needed": "採用単価の妥当性を判断できません。",
+  "searched_sources": [
+    {
+      "file_id": "file_002",
+      "label": "単価表.xlsx",
+      "scope": "全シート"
+    }
+  ],
+  "missing_fields": [
+    "effective_date"
+  ],
+  "acceptable_inputs": [
+    "file_upload",
+    "user_statement",
+    "unavailable"
+  ],
+  "impact_if_unresolved": "確定金額の推奨は保留",
+  "created_at": "2026-10-22T00:00:00Z"
+}

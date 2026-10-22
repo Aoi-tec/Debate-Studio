@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ContextRequest",
+  "description": "一般Agent→議長の追加根拠要求（v1.4.1追加）。Agentは発言末尾の ```context_request {...}``` ブロックで agent_fields のみを書き、サーバーが request_id/agent_id/turn_id/current_packet_* を確定させる。DESIGN 4.8.3 を正とし、§8 の簡略版（missing_evidence/requested_scope）は required_evidence/topic に対応する。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "request_id",
+    "agent_id",
+    "turn_id",
+    "question",
+    "required_evidence",
+    "criticality"
+  ],
+  "properties": {
+    "request_id": {
+      "type": "string"
+    },
+    "agent_id": {
+      "type": "string"
+    },
+    "turn_id": {
+      "type": "string"
+    },
+    "topic": {
+      "type": "string"
+    },
+    "question": {
+      "type": "string",
+      "minLength": 1
+    },
+    "required_evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "why_needed": {
+      "type": "string"
+    },
+    "criticality": {
+      "enum": [
+        "critical",
+        "noncritical"
+      ],
+      "description": "Agentが省略した場合は安全側で critical"
+    },
+    "current_packet_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "current_packet_version": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  }
+}

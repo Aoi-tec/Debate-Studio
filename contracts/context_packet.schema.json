@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ContextPacket",
+  "description": "議長が一般Agentへ配る唯一の資料由来コンテキスト（DESIGN 4.7）。v1.4.1で user_assertions / hypotheses を追加。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "packet_id",
+    "packet_version",
+    "session_id",
+    "recipient_agent_ids",
+    "summary",
+    "facts",
+    "assumptions",
+    "open_questions",
+    "evidence",
+    "omitted_or_unreadable",
+    "evidence_status",
+    "blocked_evidence_request_ids",
+    "source_file_versions"
+  ],
+  "properties": {
+    "packet_id": {
+      "type": "string"
+    },
+    "packet_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "topic": {
+      "type": "string"
+    },
+    "scope": {
+      "type": "string"
+    },
+    "recipient_agent_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "maxItems": 1
+    },
+    "summary": {
+      "type": "string"
+    },
+    "facts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "claim",
+          "evidence_ids",
+          "confidence"
+        ],
+        "properties": {
+          "claim": {
+            "type": "string"
+          },
+          "evidence_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "confidence": {
+            "enum": [
+              "document_explicit",
+              "document_inferred"
+            ]
+          },
+          "source_kind": {
+            "const": "document_extract"
+          },
+          "verification_status": {
+            "const": "supported_by_source"
+          },
+          "origin": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "open_questions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "user_assertions": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "hypotheses": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "source_label",
+          "file_version"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "source_label": {
+            "type": "string"
+          },
+          "file_version": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "omitted_or_unreadable": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_status": {
+      "enum": [
+        "supported",
+        "partial",
+        "blocked"
+      ]
+    },
+    "blocked_evidence_request_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "source_file_versions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer"
+      }
+    }
+  }
+}

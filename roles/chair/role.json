@@ -1,0 +1,11 @@
+{
+  "id": "chair",
+  "name": "議長（Orchestrator）",
+  "description": "資料解析・根拠照合・議論進行・ユーザー差し戻し",
+  "agent_file": "Agent.MD",
+  "capabilities": [
+    "document_analysis",
+    "retrieval",
+    "context_distribution"
+  ]
+}
