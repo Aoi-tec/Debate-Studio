@@ -189,3 +189,25 @@ async def test_prompt_injection_in_document_is_data(env_factory):
         for c in e.calls():
             assert "NEVERLEAK" not in json.dumps(c["payload"], ensure_ascii=False)
         assert "NEVERLEAK" not in json.dumps(e.events(sid), ensure_ascii=False)
+
+
+async def test_extraction_in_spawned_subprocess(env_factory):
+    """Windows and macOS start worker processes with 'spawn'; exercise that path for real."""
+    async with env_factory() as e:
+        e.c.files.in_process = False
+        f = await e.upload_ready("spawn.txt", "部品Aの単価は1,200円。\n".encode())
+        assert f["status"] == "READY" and f["chunks"] == 1
+        f = await e.upload_ready("spawn.xlsx", xlsx_bytes([["品名", "単価"], ["A", 1200]], formula_cell=False))
+        assert f["status"] == "READY"
+        from samples import slow_worker
+        e.c.files.worker_target = slow_worker  # timeout path must terminate the worker cleanly
+        e.c.settings.extraction_timeout_s = 1.0
+        f = await e.upload_ready("slow.pdf", pdf_bytes(["x"] * 3))
+        assert f["status"] == "FAILED" and "TIMEOUT" in (f["error"] or "")
+        assert not [p for p in (e.home / "data" / "uploads").iterdir() if p.name.startswith(".ex.")]
+
+
+async def test_windows_style_upload_name(env_factory):
+    async with env_factory() as e:
+        f = await e.upload_ready("C:\\fakepath\\メモ.txt", "テキスト".encode())
+        assert f["name"] == "メモ.txt" and f["status"] == "READY"

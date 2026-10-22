@@ -226,3 +226,6 @@ data/
 config/*.bak
 config/.*.tmp.*
 .debate_studio_bundle.tgz
+.venv-*/
+# built UI is committed so Windows/Mac need only Python
+!frontend/dist/

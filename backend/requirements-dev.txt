@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest>=8.0
+anyio>=4.0
+reportlab>=4.0

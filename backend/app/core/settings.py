@@ -66,10 +66,8 @@ class AppSettings:
     def ensure_dirs(self) -> None:
         for p in (self.config_dir, self.roles_dir, self.data_dir, self.uploads_dir):
             p.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(self.uploads_dir, 0o700)
-        except OSError:
-            pass
+        from app.core.fsutil import safe_chmod
+        safe_chmod(self.uploads_dir, 0o700)
 
 
 def load_settings() -> AppSettings:

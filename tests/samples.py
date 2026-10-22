@@ -90,3 +90,9 @@ def tamper_zip(original: bytes, add: dict[str, bytes] | None = None, replace: di
         for n, d in (add or {}).items():
             z.writestr(n, d)
     return buf.getvalue()
+
+
+def slow_worker(path, kind, limits, out_path):
+    """Spawned-process stand-in that never finishes in time (timeout test)."""
+    import time
+    time.sleep(30)

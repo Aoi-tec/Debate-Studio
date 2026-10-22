@@ -52,10 +52,10 @@ async def test_profile_crud_secret_never_returned(env_factory, caplog):
         listing = (await e.client.get("/api/profiles")).text
         assert secret not in listing
         # stored only in .env
-        env_text = (e.home / ".env").read_text()
+        env_text = (e.home / ".env").read_text(encoding="utf-8")
         assert f"{env_var}={secret}X" in env_text
         for f in (e.home / "config").glob("*.json"):
-            assert secret not in f.read_text()
+            assert secret not in f.read_text(encoding="utf-8")
         dbdump = "\n".join(e.c.db.conn.iterdump())
         assert secret not in dbdump
         # logs are redacted
@@ -81,7 +81,7 @@ async def test_roles_save_reload_and_constraints(env_factory):
         assert r.status_code == 201
         r = await e.client.get("/api/roles/facilitator")
         assert r.json()["agent_md"].startswith("# ファシリ")
-        assert json.loads((e.home / "roles" / "facilitator" / "role.json").read_text())["agent_file"] == "Agent.MD"
+        assert json.loads((e.home / "roles" / "facilitator" / "role.json").read_text(encoding="utf-8"))["agent_file"] == "Agent.MD"
         # id immutable
         r = await e.client.put("/api/roles/facilitator", json={"id": "other", "name": "x", "agent_md": ""})
         assert r.status_code == 422
@@ -119,6 +119,17 @@ async def test_auth_and_csrf(env_factory):
             assert (await anon.post("/api/sessions", json={"topic": "x"})).status_code == 403
             # foreign origin
             r = await anon.get("/api/agents", headers={"Origin": "https://evil.example"})
+            assert r.status_code == 403
+            # DNS rebinding: loopback client but foreign Host header
+            r = await anon.get("/api/auth/bootstrap", headers={"Host": "evil.example:8000"})
+            assert r.status_code == 403
+        # any port works as long as Origin matches the loopback Host (launcher --port)
+        t2 = httpx.ASGITransport(app=e.app, client=("127.0.0.1", 1))
+        async with httpx.AsyncClient(transport=t2, base_url="http://127.0.0.1:8123",
+                                     headers={"X-Requested-With": "DebateStudio", "Origin": "http://127.0.0.1:8123"}) as other:
+            await other.get("/api/auth/bootstrap")
+            assert (await other.post("/api/sessions", json={"topic": "port test"})).status_code == 201
+            r = await other.post("/api/sessions", json={"topic": "x"}, headers={"Origin": "http://127.0.0.1:9999"})
             assert r.status_code == 403
         remote = httpx.ASGITransport(app=e.app, client=("203.0.113.5", 1))
         async with httpx.AsyncClient(transport=remote, base_url="http://x") as rc:

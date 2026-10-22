@@ -305,7 +305,9 @@ class DebateController:
     def recover_after_restart(self) -> None:
         active = self.db.all("SELECT id, state FROM debate_sessions WHERE state NOT IN ('COMPLETED','FAILED','CANCELLED','CREATED','WAITING_USER_DECISION','WAITING_USER_EVIDENCE','PAUSED','PAUSED_BUDGET')")
         for r in active:
-            self.db.execute("UPDATE messages SET status='incomplete', meta_json=json_set(meta_json,'$.reason','restart') WHERE session_id=? AND status='streaming'", (r["id"],))
+            for m in self.db.all("SELECT id FROM messages WHERE session_id=? AND status='streaming'", (r["id"],)):
+                self.db.update("messages", {"id": m["id"]}, {"status": "incomplete"})
+                self._merge_meta(m["id"], {"reason": "restart"})
             self.db.update("debate_sessions", {"id": r["id"]}, {"state": "PAUSED", "blockers_json": [
                 {"type": "restart", "message": "アプリ再起動により中断しました。未確定の発言は採用していません。再開してください。"}]})
             self.bus.publish(r["id"], "phase.changed", {"from": r["state"], "phase": "PAUSED", "reason": "restart"})

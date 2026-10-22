@@ -10,6 +10,7 @@ import tempfile
 import threading
 from pathlib import Path
 
+from app.core.fsutil import replace_with_retry, safe_chmod
 from app.core.redact import register_secret, unregister_secret
 
 _LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$")
@@ -99,11 +100,8 @@ class SecretStore:
                 f.write(content)
                 f.flush()
                 os.fsync(f.fileno())
-            try:
-                os.chmod(tmp, 0o600)
-            except OSError:
-                pass
-            os.replace(tmp, self.path)
+            safe_chmod(tmp, 0o600)
+            replace_with_retry(tmp, self.path)
         except Exception:
             try:
                 os.unlink(tmp)

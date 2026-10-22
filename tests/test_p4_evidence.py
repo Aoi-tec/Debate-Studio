@@ -237,7 +237,7 @@ async def test_waiting_state_survives_restart(env_factory):
 async def test_contract_schema_matches(env_factory):
     """Stored EvidenceRequest bodies validate against contracts/evidence_request.schema.json."""
     import pathlib
-    schema = json.loads((pathlib.Path(__file__).resolve().parents[1] / "contracts" / "evidence_request.schema.json").read_text())
+    schema = json.loads((pathlib.Path(__file__).resolve().parents[1] / "contracts" / "evidence_request.schema.json").read_text(encoding="utf-8"))
     req = set(schema["required"])
     props = set(schema["properties"])
     async with env_factory() as e:

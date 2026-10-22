@@ -225,7 +225,7 @@ async def test_document_transfer_permission_is_enforced(env_factory):
 
 async def test_packet_bodies_match_contract(env_factory):
     import pathlib
-    schema = json.loads((pathlib.Path(__file__).resolve().parents[1] / "contracts" / "context_packet.schema.json").read_text())
+    schema = json.loads((pathlib.Path(__file__).resolve().parents[1] / "contracts" / "context_packet.schema.json").read_text(encoding="utf-8"))
     async with env_factory() as e:
         f = await e.upload_ready("p.txt", "単価は100円。適用開始日は2026年4月1日。".encode())
         sid = await e.new_session(attachment_ids=[f["file_id"]])

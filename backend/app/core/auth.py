@@ -31,12 +31,38 @@ def is_loopback(host: str | None) -> bool:
         return False
 
 
+def split_host(value: str) -> tuple[str, str]:
+    """'127.0.0.1:8000' -> ('127.0.0.1', '8000'); '[::1]:8000' -> ('::1', '8000')."""
+    v = (value or "").strip().rstrip("/")
+    if v.startswith("["):
+        host, _, rest = v[1:].partition("]")
+        return host, rest.lstrip(":")
+    if v.count(":") == 1:
+        host, port = v.split(":")
+        return host, port
+    return v, ""
+
+
 class AuthMiddleware:
     def __init__(self, app, token: str, allowed_origins: tuple[str, ...], allow_remote: bool = False):
         self.app = app
         self.token = token
         self.allowed_origins = set(allowed_origins)
         self.allow_remote = allow_remote
+
+    def _origin_ok(self, origin: str, host_hdr: str) -> bool:
+        if origin in self.allowed_origins:
+            return True
+        # same-origin on any port (e.g. --port 8123): http://127.0.0.1:8123 with Host 127.0.0.1:8123
+        try:
+            scheme, rest = origin.split("://", 1)
+        except ValueError:
+            return False
+        if scheme not in ("http", "https"):
+            return False
+        o_host, o_port = split_host(rest)
+        h_host, h_port = split_host(host_hdr)
+        return is_loopback(o_host) and is_loopback(h_host) and o_port == h_port
 
     async def _deny(self, send, status: int, message: str) -> None:
         body = json.dumps({"detail": {"message": message}}, ensure_ascii=False).encode()
@@ -52,8 +78,12 @@ class AuthMiddleware:
         client = (scope.get("client") or (None, None))[0]
         if not self.allow_remote and not is_loopback(client):
             return await self._deny(send, 403, "localhost からのみ利用できます")
+        host_hdr = headers.get("host", "")
+        if not self.allow_remote and not is_loopback(split_host(host_hdr)[0]):
+            # DNS rebinding defence: a page on evil.example resolved to 127.0.0.1 sends Host: evil.example
+            return await self._deny(send, 403, "Host ヘッダーが localhost ではありません")
         origin = headers.get("origin")
-        if origin and origin not in self.allowed_origins:
+        if origin and not self._origin_ok(origin, host_hdr):
             return await self._deny(send, 403, "許可されていない Origin です")
         if scope["path"] in OPEN_PATHS:
             return await self.app(scope, receive, send)

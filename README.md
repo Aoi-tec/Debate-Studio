@@ -1,26 +1,39 @@
-#Debate Studio v1.4
+# Discussion_AIs — Debate Studio v1.4
 
-複数のLLMが役割（議長・提案・批判・代替案など）を持って討論し、その過程をLINE風のグループチャットでリアルタイムに観測・操作するローカルWebアプリです。
+AIにディスカッションさせるやつ。複数のLLMが役割（議長・提案・批判・代替案など）を持って討論し、その過程をLINE風のグループチャットでリアルタイムに観測・操作するローカルWebアプリです。
+設計は `ai/DebateStudio/DESIGN_v1.4.md`、開発ルールは同フォルダの `Agent.MD` / `Skill.MD` / `Task.MD` に従っています。
 
+## 起動（Windows / Mac 共通）
 
-## 起動（Mac / Linux）
+必要なのは **Python 3.10 以上** だけです（画面はビルド済みの `frontend/dist` を同梱）。Node.js は画面のソースを変更したときだけ必要です。
 
+### Windows
+1. Python をインストール: https://www.python.org/downloads/ （インストーラで **「Add python.exe to PATH」にチェック**）
+   または PowerShell で `winget install Python.Python.3.12`
+2. フォルダ内の **`start.bat` をダブルクリック**（APIキーなしで試すなら **`start-demo.bat`**）
+3. 初回は必要なパッケージを自動でインストールし、ブラウザで http://127.0.0.1:8000 が開きます。終了はウィンドウで `Ctrl+C`
+
+### Mac
+1. Python をインストール: https://www.python.org/downloads/macos/ または `brew install python@3.12`
+   （macOS に最初から入っている `python3` は 3.9 のことがあり、そのままでは動きません）
+2. Finder で **`start.command` をダブルクリック**（デモは **`start-demo.command`**）
+   - ZIPでダウンロードした場合など「開発元が未確認」と出たら、右クリック →「開く」
+   - 実行できない場合はターミナルで `chmod +x start.command start-demo.command`
+3. ブラウザで http://127.0.0.1:8000 が開きます。終了はターミナルで `Ctrl+C`
+
+### ターミナルから（全OS共通）
 ```bash
-# 1) バックエンド（Python 3.10 以上）
-python3 -m venv .venv
-.venv/bin/python -m pip install -r backend/requirements.txt
-
-# 2) 画面をビルド（Node.js 18 以上。frontend/dist があれば省略可）
-cd frontend && npm install && npm run build && cd ..
-
-# 3) 起動 → ブラウザで http://127.0.0.1:8000
-.venv/bin/uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
+python run.py              # Windows は  py run.py  でも可
+python run.py --demo       # デモ（FakeProvider・課金なし）
+python run.py --port 8123  # ポート変更
+python run.py --check      # 環境チェック
+python run.py --test       # 自動テスト
+python run.py --build      # 画面を作り直す（Node.js 18 以上が必要）
 ```
 
-`scripts/run.sh` でも起動できます（初回は .venv を自動作成）。
-**APIキーなしで試す場合**は `DEMO=1 scripts/run.sh`。オフラインの FakeProvider（課金なし）が「Fake（デモ用）」接続として現れます。
-
-画面の開発時は `cd frontend && npm run dev`（http://127.0.0.1:5173、`/api` は 8000 番へプロキシ）。
+- 仮想環境は OS ごとに別フォルダ（`.venv-win32` / `.venv-darwin` / `.venv-linux`）に作られるため、同じフォルダを Windows と Mac で共有しても衝突しません。`node_modules` も別OS用を検出すると入れ直します。
+- 画面のソース（`frontend/src`）がビルドより新しく、Node.js がある場合は自動で再ビルドします。
+- 画面の開発時は `cd frontend && npm install && npm run dev`（http://127.0.0.1:5173、`/api` は 8000 番へプロキシ）。
 
 ## OpenAI で使う最短手順
 
@@ -52,9 +65,10 @@ cd frontend && npm install && npm run build && cd ..
 ## テスト
 
 ```bash
-.venv/bin/python -m pytest            # バックエンド 50件（FakeProvider・HTTPモックのみ。外部API・課金なし）
-cd frontend && npm run typecheck && npm test
+python run.py --test                  # バックエンド 52件＋（Node.jsがあれば）画面の型検査・テスト
 ```
+
+`.github/workflows/ci.yml` は push 時に **Windows / macOS / Linux × Python 3.10 / 3.13** で同じテストを実行します。
 
 ## セキュリティ上の前提
 
@@ -62,7 +76,7 @@ cd frontend && npm run typecheck && npm test
 - 起動ごとにランダムなセッションCookie（HttpOnly / SameSite=Strict）を発行し、変更系のAPIでは `X-Requested-With` ヘッダーと Origin を検査します。
 - 共有サーバーとして公開する場合は、ユーザー別の認可と秘密管理、TLS、SSRF対策を別途追加してください（設計書 §12）。
 - アップロードしたファイルは `data/uploads/` にランダムな名前で保存されます（Web非公開・Git管理外）。
-- 解析は別プロセスで実行し、タイムアウトを設けています。メモリ上限は Linux でのみ有効で、macOS では効きません。
+- 解析は別プロセス（spawn）で実行し、タイムアウトを設けています。プロセスのメモリ上限は Linux でのみ有効で、Windows / macOS では効きません。
 
 ## 未対応・制約（Task.MD の確認事項も参照）
 

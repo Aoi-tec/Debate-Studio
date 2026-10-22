@@ -14,6 +14,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from app.core.fsutil import replace_with_retry
 from app.models.schemas import AgentConfig, AgentsDoc, ApiProfile, DebateSettings, RoleMeta
 
 DEFAULT_ROLES: dict[str, tuple[dict, str]] = {
@@ -50,7 +51,7 @@ def atomic_write_text(path: Path, content: str, backup: bool = True) -> None:
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        replace_with_retry(tmp, path)
     except Exception:
         try:
             os.unlink(tmp)

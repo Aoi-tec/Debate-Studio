@@ -18,6 +18,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
 
+from app.core.fsutil import display_name, replace_with_retry, safe_chmod
 from app.core.ids import new_id, now_iso
 from app.core.settings import AppSettings
 from app.core.tokens import estimate_tokens
@@ -45,7 +46,7 @@ class UploadRejected(Exception):
 
 
 def _ext(name: str) -> str:
-    base = os.path.basename(name or "")
+    base = display_name(name, "")
     return base.rsplit(".", 1)[-1].lower() if "." in base else ""
 
 
@@ -140,6 +141,7 @@ class AttachmentService:
         self.db = db
         self.bus = bus
         self.in_process = False  # tests may run extraction inline
+        self.worker_target = extraction_worker  # must be importable in a spawned child
         self._sem = asyncio.Semaphore(2)
         self._jobs: dict[str, asyncio.Task] = {}
         self.listeners: list[Callable[[str, str], Any]] = []  # (file_id, status) callbacks
@@ -171,15 +173,15 @@ class AttachmentService:
             kind = sniff(Path(tmp), ext)
             if kind in OOXML_MAIN:
                 validate_ooxml(Path(tmp), kind, self.s.max_uncompressed_bytes, self.s.max_zip_ratio)
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, dest)
+            safe_chmod(tmp, 0o600)
+            replace_with_retry(tmp, dest)
         except BaseException:
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
             raise
-        display = os.path.basename(filename or "file")[:200]
+        display = display_name(filename)[:200]
         self.db.insert("uploaded_files", {
             "file_id": file_id, "original_name": display, "stored_name": stored, "sha256": h.hexdigest(),
             "mime": ALLOWED[ext], "kind": kind, "size": size, "created_at": now_iso(), "status": "PENDING",
@@ -271,7 +273,7 @@ class AttachmentService:
         ctx = mp.get_context("spawn")
         fd, out = tempfile.mkstemp(dir=str(self.s.uploads_dir), prefix=".ex.")
         os.close(fd)
-        proc = ctx.Process(target=extraction_worker, args=(path, kind, limits, out), daemon=True)
+        proc = ctx.Process(target=self.worker_target, args=(path, kind, limits, out), daemon=True)
         proc.start()
         try:
             loop = asyncio.get_event_loop()
