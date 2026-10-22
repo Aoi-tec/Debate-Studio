@@ -1,0 +1,2 @@
+# Discussion_AIs
+AIにディスカッションさせるやつ
