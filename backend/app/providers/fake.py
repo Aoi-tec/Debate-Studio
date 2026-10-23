@@ -56,10 +56,18 @@ class FakeAdapter(ProviderAdapter):
 
     async def stream_completion(self, req: LLMRequest, *, base_url: str | None, api_key: str | None) -> AsyncIterator[LLMEvent]:
         meta = dict(req.metadata)
-        self.script.calls.append({"meta": meta, "payload": req.to_audit_dict(), "model": req.model})
+        self.script.calls.append({"meta": meta, "payload": req.to_audit_dict(), "model": req.model,
+                                  "reasoning_effort": req.reasoning_effort, "thinking_budget": req.thinking_budget})
         scripted = self.script.take(meta)
         yield LLMEvent("START")
         partial_error: ProviderError | None = None
+        thinking = ""
+        if isinstance(scripted, dict) and "thinking" in scripted:
+            thinking = scripted["thinking"]
+            scripted = scripted.get("text", "") if "context_request" not in scripted else {
+                k: v for k, v in scripted.items() if k != "thinking"}
+            if scripted == "":
+                scripted = {"text": ""}
         if isinstance(scripted, dict) and "error" in scripted:
             text = scripted.get("partial", "")
             partial_error = ProviderError(scripted["error"], scripted.get("message", "fake error"),
@@ -77,13 +85,25 @@ class FakeAdapter(ProviderAdapter):
             text = scripted(req)
         else:
             text = self._default(req)
+            if req.reasoning_effort in ("low", "medium", "high") and not thinking:
+                # demo: simulate private reasoning proportional to the effort (never shown in the UI)
+                thinking = "（擬似思考）前提と反論を検討する。" * {"low": 8, "medium": 20, "high": 40}[req.reasoning_effort]
         step = max(1, self.script.chunk_chars)
         out_tokens = 0
+        for i in range(0, len(thinking), step):  # thinking consumes the same output cap
+            piece = thinking[i:i + step]
+            out_tokens += estimate_tokens(piece)
+            if req.max_output_tokens and out_tokens > req.max_output_tokens:
+                yield LLMEvent("USAGE", usage=self._usage(req, thinking[:i]))
+                yield LLMEvent("FINISHED", finish_reason="length")
+                return
+            await asyncio.sleep(0)
+            yield LLMEvent("THINKING_DELTA", text=piece)
         for i in range(0, len(text), step):
             piece = text[i:i + step]
             out_tokens += estimate_tokens(piece)
             if req.max_output_tokens and out_tokens > req.max_output_tokens:
-                yield LLMEvent("USAGE", usage=self._usage(req, text[:i]))
+                yield LLMEvent("USAGE", usage=self._usage(req, thinking + text[:i]))
                 yield LLMEvent("FINISHED", finish_reason="length")
                 return
             if self.script.delay_s:
@@ -94,12 +114,12 @@ class FakeAdapter(ProviderAdapter):
         if partial_error:
             yield LLMEvent("ERROR", error=partial_error)
             return
-        yield LLMEvent("USAGE", usage=self._usage(req, text))
+        yield LLMEvent("USAGE", usage=self._usage(req, thinking + text, estimate_tokens(thinking) if thinking else None))
         yield LLMEvent("FINISHED", finish_reason="stop")
 
-    def _usage(self, req: LLMRequest, text: str) -> Usage:
+    def _usage(self, req: LLMRequest, text: str, reasoning: int | None = None) -> Usage:
         inp = estimate_tokens(req.system) + sum(estimate_tokens(m["content"]) for m in req.messages)
-        return Usage(input_tokens=inp, output_tokens=estimate_tokens(text), source="reported")
+        return Usage(input_tokens=inp, output_tokens=estimate_tokens(text), reasoning_tokens=reasoning, source="reported")
 
     async def read_usage_snapshot(self, *, base_url: str | None, admin_key: str | None, start_unix: int) -> UsageSnapshot:
         if self.script.usage_snapshot_tokens is None:

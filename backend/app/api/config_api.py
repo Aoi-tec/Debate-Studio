@@ -13,7 +13,7 @@ from app.api.deps import C, http_error
 from app.container import Container
 from app.core.redact import redact
 from app.models.schemas import (AgentConfig, ApiProfile, ApiProfileCreate, ApiProfilePatch, BudgetPut,
-                                DebateSettings, ImportAgentMd, QualityStatus, QuotaPut, RoleMeta, RoleUpsert, SecretPut)
+                                DebateSettings, ImportAgentMd, QualityStatus, QuotaPut, ReasoningConfig, RoleMeta, RoleUpsert, SecretPut)
 from app.providers.base import LLMRequest
 from app.services.budget import month_start_unix
 
@@ -48,7 +48,9 @@ async def create_profile(body: ApiProfileCreate, c: Container = Depends(C)):
         p = ApiProfile(id=pid, name=body.name, protocol=body.protocol, base_url=body.base_url,
                        default_model=body.default_model, env_var=env_var, billing_family=body.billing_family,
                        allow_document_transfer=body.allow_document_transfer,
-                       quota={"mode": "auto" if body.billing_family != "local" else "disabled"})
+                       reasoning=body.reasoning or ReasoningConfig(),
+                       max_concurrent_requests=body.max_concurrent_requests,
+                       quota={"mode": "auto" if body.billing_family != "local" else "disabled", "scope": "per_agent"})
     except ValidationError as e:
         raise http_error(422, "入力が不正です", [redact(x["msg"]) for x in e.errors()])
     if body.api_key and env_var:
@@ -128,6 +130,33 @@ async def test_profile(pid: str, c: Container = Depends(C)):
         return {"ok": False, "stage": stage, "message": redact(str(err))}
     return {"ok": True, "streaming": streamed, "finish_reason": finished, "latency_ms": int((time.time() - t0) * 1000),
             "sample": redact(got_text[:40])}
+
+
+@router.get("/profiles/{pid}/models")
+async def list_models(pid: str, c: Container = Depends(C)):
+    """Model IDs offered by an OpenAI-compatible server (Strata, Ollama, LM Studio, OpenAI…)."""
+    import httpx
+
+    from app.providers import base as _pb
+    p = c.config.profile(pid)
+    if not p:
+        raise http_error(404, "プロファイルが見つかりません")
+    if p.protocol not in ("openai_chat_compatible", "openai_responses"):
+        return {"models": [], "message": "この方式ではモデル一覧の自動取得に未対応です"}
+    base = (p.base_url or "https://api.openai.com/v1").rstrip("/")
+    headers = {}
+    key = c.secrets.get(p.env_var)
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    try:
+        async with _pb.client(15) as client:
+            r = await client.get(f"{base}/models", headers=headers)
+        if r.status_code >= 400:
+            return {"models": [], "message": redact(f"HTTP {r.status_code}: {r.text[:200]}")}
+        data = r.json().get("data", [])
+        return {"models": sorted({m.get("id") for m in data if isinstance(m, dict) and m.get("id")})}
+    except (httpx.HTTPError, ValueError) as e:
+        return {"models": [], "message": redact(f"取得できません: {type(e).__name__}")}
 
 
 @router.get("/profiles/{pid}/quota")
@@ -348,7 +377,7 @@ async def get_routing(aid: str, session_id: str | None = None, c: Container = De
         if session_id:
             info["budget"] = c.guard.agent_budget(session_id, aid, tier)
             if p:
-                info["pool"] = c.guard.pool_projection(session_id, p.pool_id)
+                info["pool"] = c.guard.pool_projection(session_id, p.pool_key(aid))
         tiers.append(info)
     handoffs = c.db.all("SELECT * FROM model_handoffs WHERE agent_id=? " + ("AND session_id=? " if session_id else "") + "ORDER BY created_at DESC LIMIT 50",
                         (aid, session_id) if session_id else (aid,))

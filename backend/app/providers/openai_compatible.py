@@ -34,6 +34,14 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             body[key] = req.max_output_tokens
         if req.json_mode and "response_format" not in drop:
             body["response_format"] = {"type": "json_object"}
+        eff = req.reasoning_effort
+        if eff and eff != "provider_default":
+            official = OPENAI_HOST in base_url
+            if "reasoning_effort" not in drop:
+                # OpenAI uses "none" for no thinking; Strata/vLLM-style local servers accept "off"
+                body["reasoning_effort"] = ("none" if official else "off") if eff == "off" else eff
+            if eff == "off" and not official and "chat_template_kwargs" not in drop:
+                body["chat_template_kwargs"] = {"enable_thinking": False}  # Qwen3 on vLLM / SGLang
         return body
 
     async def stream_completion(self, req: LLMRequest, *, base_url: str | None, api_key: str | None) -> AsyncIterator[LLMEvent]:
@@ -43,7 +51,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             headers["Authorization"] = f"Bearer {api_key}"
         include_usage = True
         drop: set[str] = set()
-        for _attempt in range(4):  # parameter-compat retries only (not error retries)
+        for _attempt in range(7):  # parameter-compat retries only (not error retries)
             body = self._payload(req, base, include_usage=include_usage, drop=drop)
             try:
                 async with _pb.client(timeout_for(req)) as client:
@@ -59,8 +67,13 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                                 if "temperature" in low and "temperature" not in drop:
                                     drop.add("temperature")
                                     continue
-                                if "response_format" in low and "response_format" not in drop:
-                                    drop.add("response_format")
+                                dropped = False
+                                for opt in ("response_format", "reasoning_effort", "chat_template_kwargs"):
+                                    if opt in low and opt not in drop:
+                                        drop.add(opt)
+                                        dropped = True
+                                        break
+                                if dropped:
                                     continue
                             yield LLMEvent("ERROR", error=err)
                             return
@@ -75,7 +88,11 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                                 yield LLMEvent("ERROR", error=ProviderError("transient", str(obj["error"])))
                                 return
                             for ch in obj.get("choices") or []:
-                                delta = (ch.get("delta") or {}).get("content")
+                                d = ch.get("delta") or {}
+                                thought = d.get("reasoning_content") or d.get("reasoning")
+                                if isinstance(thought, str) and thought:
+                                    yield LLMEvent("THINKING_DELTA", text=thought)
+                                delta = d.get("content")
                                 if delta:
                                     yield LLMEvent("TEXT_DELTA", text=delta)
                                 if ch.get("finish_reason"):

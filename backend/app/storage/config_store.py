@@ -200,7 +200,17 @@ class ConfigStore:
     # ------------------------------------------------------------ settings
     def settings(self) -> DebateSettings:
         with self._lock:
-            return DebateSettings.model_validate(self._read(self.settings_path))
+            raw = self._read(self.settings_path)
+            if int(raw.get("settings_version") or 1) < 2:
+                # v1 → v2: the old 800-token default left no room once a model starts thinking
+                deb = raw.setdefault("debate", {})
+                if deb.get("max_output_tokens", 800) == 800:
+                    deb["max_output_tokens"] = 1500
+                raw["settings_version"] = 2
+                s = DebateSettings.model_validate(raw)
+                self._write(self.settings_path, s.model_dump())
+                return s
+            return DebateSettings.model_validate(raw)
 
     def save_settings(self, s: DebateSettings) -> None:
         with self._lock:

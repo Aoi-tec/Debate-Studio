@@ -23,7 +23,7 @@ class OpenAIResponsesAdapter(OpenAICompatibleAdapter):
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         drop: set[str] = set()
-        for _ in range(3):
+        for _ in range(4):
             body: dict = {
                 "model": req.model,
                 "instructions": req.system,
@@ -34,6 +34,8 @@ class OpenAIResponsesAdapter(OpenAICompatibleAdapter):
             }
             if req.temperature is not None and "temperature" not in drop:
                 body["temperature"] = req.temperature
+            if req.reasoning_effort and req.reasoning_effort != "provider_default" and "reasoning" not in drop:
+                body["reasoning"] = {"effort": "none" if req.reasoning_effort == "off" else req.reasoning_effort}
             if req.json_mode and "text" not in drop:
                 body["text"] = {"format": {"type": "json_object"}}
             try:
@@ -44,6 +46,9 @@ class OpenAIResponsesAdapter(OpenAICompatibleAdapter):
                             err = http_error(resp, text)
                             if err.kind == "bad_request" and "temperature" in text.lower() and "temperature" not in drop:
                                 drop.add("temperature")
+                                continue
+                            if err.kind == "bad_request" and "reasoning" in text.lower() and "reasoning" not in drop:
+                                drop.add("reasoning")
                                 continue
                             if err.kind == "bad_request" and "text.format" in text.lower() and "text" not in drop:
                                 drop.add("text")
@@ -57,6 +62,9 @@ class OpenAIResponsesAdapter(OpenAICompatibleAdapter):
                             if etype == "response.output_text.delta":
                                 if obj.get("delta"):
                                     yield LLMEvent("TEXT_DELTA", text=obj["delta"])
+                            elif etype in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
+                                if obj.get("delta"):
+                                    yield LLMEvent("THINKING_DELTA", text=obj["delta"])
                             elif etype in ("response.completed", "response.incomplete"):
                                 r = obj.get("response") or {}
                                 u = r.get("usage") or {}

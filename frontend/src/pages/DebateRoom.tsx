@@ -288,12 +288,13 @@ function SidePanel({ d, typing, refetch }: { d: SessionDetail; typing: Record<st
           {Object.entries(d.usage.by_agent).map(([aid, u]: any) => (
             <div key={aid} className="usage-agent">
               <strong>{d.agents.find((a) => a.id === aid)?.name || aid}</strong> {fmtTokens(u.input + u.output)} tok <span className="muted small">[{u.sources.join(",")}]</span>
+              <div className="muted small">入力 {fmtTokens(u.input)} / 出力 {fmtTokens(u.output)}{u.reasoning ? `（うち思考 ${fmtTokens(u.reasoning)}）` : ""}</div>
               <div className="muted small">{Object.entries(u.by_purpose).map(([p, n]: any) => `${p}: ${fmtTokens(n)}`).join(" ・ ")}</div>
             </div>
           ))}
           {d.baselines.length > 0 && (
             <div className="card-sec"><div className="card-sec-title">API口座の閾値（開始時に固定）</div>
-              <ul>{d.baselines.map((b, i) => <li key={i} className="small">{b.pool_id}: {b.source === "disabled" ? "無効" : `U0=${fmtTokens(b.u0)} → 閾値 ${fmtTokens(b.limit_tokens)}（${b.source}${b.estimated ? "・推定" : ""}）`}</li>)}</ul>
+              <ul>{d.baselines.map((b, i) => <li key={i} className="small">{b.pool_id.includes("@") ? `${b.pool_id.split("@")[0]}（${d.agents.find((a) => a.id === b.pool_id.split("@")[1])?.name || b.pool_id.split("@")[1]}専用）` : `${b.pool_id}（全Agent共有）`}: {b.source === "disabled" ? "無効" : `U0=${fmtTokens(b.u0)} → 閾値 ${fmtTokens(b.limit_tokens)}（${b.source}${b.estimated ? "・推定" : ""}）`}</li>)}</ul>
               <div className="muted small">アプリ独自の自動上限であり、提供元の公式な残り枠ではありません。</div>
             </div>
           )}

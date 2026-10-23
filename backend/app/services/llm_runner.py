@@ -12,7 +12,7 @@ from typing import Any, Callable, Optional
 from app.core.ids import new_id, now_iso
 from app.core.tokens import estimate_tokens
 from app.models.schemas import AgentConfig, ApiProfile, DebateSettings, RoleMeta
-from app.providers.base import LLMRequest, ProviderError, Usage
+from app.providers.base import TRUNCATED_FINISH, LLMRequest, ProviderError, ThinkFilter, Usage
 from app.providers.registry import ProviderRegistry
 from app.services.budget import BudgetGuard, BudgetPaused, ModelRouter, Reservation
 from app.services.context import validate_no_file_or_tool_payload
@@ -80,6 +80,18 @@ class LLMRunner:
         self.guard, self.meter, self.secrets = guard, meter, secrets
         self.backoff_base = 1.0
         self.max_backoff = 30.0
+        self._slots: dict[str, tuple[int, asyncio.Semaphore]] = {}
+
+    def _slot(self, profile: ApiProfile) -> asyncio.Semaphore | None:
+        """Per-connection concurrency limit (e.g. a local server with one context slot)."""
+        n = profile.max_concurrent_requests
+        if not n:
+            return None
+        cur = self._slots.get(profile.id)
+        if cur is None or cur[0] != n:
+            cur = (n, asyncio.Semaphore(n))
+            self._slots[profile.id] = cur
+        return cur[1]
 
     def next_seq(self, session_id: str) -> int:
         r = self.db.one("SELECT COALESCE(MAX(seq),0) m FROM messages WHERE session_id=?", (session_id,))
@@ -103,11 +115,14 @@ class LLMRunner:
         transient_tries = 0
         prev_partial_id: str | None = None
         handoff_reason: str | None = None
+        boost = 1.0
+        truncation_retries = 0
         while True:
             attempt += 1
             choice = self.router.select(session_id=ctx.id, agent=agent, profiles=ctx.profiles, settings=s,
                                         est_input=est_input, desired_output=s.debate.max_output_tokens,
-                                        needs_document_transfer=needs_document_transfer, exclude_tiers=exclude)
+                                        needs_document_transfer=needs_document_transfer, exclude_tiers=exclude,
+                                        boost=boost)
             prev_tier = ctx.last_tier.get(agent.id)
             if prev_tier and prev_tier != choice.tier:
                 reason = handoff_reason or "; ".join(choice.skipped) or "上位Tierが利用不可"
@@ -117,6 +132,12 @@ class LLMRunner:
             elif choice.skipped and not prev_tier and choice.tier != "primary_cloud":
                 handoff_reason = "; ".join(choice.skipped)
             req = build(choice.model, choice.reservation.max_output)
+            rc = choice.profile.reasoning
+            req.max_output_tokens = max(req.max_output_tokens, 1)
+            req.reasoning_effort = rc.effort
+            # thinking budget never exceeds what is left after the visible answer
+            req.thinking_budget = max(0, min(int(rc.thinking_budget * boost),
+                                             req.max_output_tokens - min(s.debate.max_output_tokens, req.max_output_tokens // 2)))
             req.metadata.update({"purpose": purpose, "agent_id": agent.id, "agent_name": agent.name,
                                  "role_id": agent.role_id, "tier": choice.tier})
             if participant_guard:
@@ -126,28 +147,36 @@ class LLMRunner:
                     self.guard.settle(choice.reservation, 0)
                     self.bus.publish(ctx.id, "error", {"agent_id": agent.id, "message": f"送信前検査で遮断: {e}"})
                     raise TurnFailed(f"送信前検査で遮断: {e}", "payload_violation", agent.id) from e
-            msg_id = None
-            if stream_message is not None:
-                msg_id = self._create_message(ctx, agent, choice, stream_message)
-                self.bus.publish(ctx.id, "turn.started", {
-                    "agent_id": agent.id, "message_id": msg_id, "round": stream_message.get("round"),
-                    "phase": stream_message.get("phase"), "kind": stream_message.get("kind", "turn"),
-                    "tier": choice.tier, "model_id": choice.model, "profile_id": choice.profile.id,
-                    "attempt": attempt})
-                if prev_tier and prev_tier != choice.tier:
-                    hid = new_id("ho")
-                    self.db.insert("model_handoffs", {
-                        "id": hid, "session_id": ctx.id, "agent_id": agent.id, "from_tier": prev_tier,
-                        "to_tier": choice.tier, "from_model": None, "to_model": choice.model,
-                        "reason": handoff_reason or "; ".join(choice.skipped), "partial_message_id": prev_partial_id,
-                        "new_message_id": msg_id, "quality": None, "created_at": now_iso()})
-                    self.db.update("messages", {"id": msg_id}, {"handoff_id": hid})
-                    self.bus.publish(ctx.id, "model.handoff_completed", {
-                        "agent_id": agent.id, "handoff_id": hid, "from_tier": prev_tier, "to_tier": choice.tier,
-                        "message_id": msg_id, "reason": handoff_reason or "; ".join(choice.skipped)})
-            ctx.last_tier[agent.id] = choice.tier
-            outcome = await self._stream(ctx, agent, choice.reservation, req, msg_id, est_input)
-            text, usage, finish, err, budget_cut = outcome
+            sem = self._slot(choice.profile)
+            if sem is not None:
+                await sem.acquire()
+            try:
+                msg_id = None
+                if stream_message is not None:
+                    msg_id = self._create_message(ctx, agent, choice, stream_message)
+                    self.bus.publish(ctx.id, "turn.started", {
+                        "agent_id": agent.id, "message_id": msg_id, "round": stream_message.get("round"),
+                        "phase": stream_message.get("phase"), "kind": stream_message.get("kind", "turn"),
+                        "tier": choice.tier, "model_id": choice.model, "profile_id": choice.profile.id,
+                        "attempt": attempt, "max_output_tokens": req.max_output_tokens,
+                        "reasoning_effort": rc.effort, "thinking_budget": req.thinking_budget})
+                    if prev_tier and prev_tier != choice.tier:
+                        hid = new_id("ho")
+                        self.db.insert("model_handoffs", {
+                            "id": hid, "session_id": ctx.id, "agent_id": agent.id, "from_tier": prev_tier,
+                            "to_tier": choice.tier, "from_model": None, "to_model": choice.model,
+                            "reason": handoff_reason or "; ".join(choice.skipped), "partial_message_id": prev_partial_id,
+                            "new_message_id": msg_id, "quality": None, "created_at": now_iso()})
+                        self.db.update("messages", {"id": msg_id}, {"handoff_id": hid})
+                        self.bus.publish(ctx.id, "model.handoff_completed", {
+                            "agent_id": agent.id, "handoff_id": hid, "from_tier": prev_tier, "to_tier": choice.tier,
+                            "message_id": msg_id, "reason": handoff_reason or "; ".join(choice.skipped)})
+                ctx.last_tier[agent.id] = choice.tier
+                outcome = await self._stream(ctx, agent, choice.reservation, req, msg_id, est_input)
+                text, usage, finish, err, budget_cut, thinking_tokens = outcome
+            finally:
+                if sem is not None:
+                    sem.release()
             self._record_usage(ctx, agent, request_id, attempt, purpose, choice.reservation, usage, s)
             self.guard.settle(choice.reservation, usage.total)
             self._budget_events(ctx, agent, choice.tier)
@@ -181,7 +210,30 @@ class LLMRunner:
                     prev_partial_id = msg_id
                     continue
                 raise TurnFailed(f"{err.kind}: {err.message}", err.kind, agent.id)
-            # FINISHED
+            # FINISHED — was the reply cut off by the output cap?
+            truncated = finish in TRUNCATED_FINISH
+            if truncated:
+                can_grow = choice.reservation.max_output < s.debate.truncation_retry_cap
+                if truncation_retries < 1 and can_grow:
+                    truncation_retries += 1
+                    boost *= 2
+                    self._finish_message(ctx, msg_id, text, "incomplete", {"reason": "truncated",
+                                                                           "thinking_tokens": thinking_tokens})
+                    if msg_id:
+                        self.bus.publish(ctx.id, "turn.failed", {"agent_id": agent.id, "message_id": msg_id,
+                                                                  "error": "truncated", "partial": bool(text)})
+                    self.bus.publish(ctx.id, "warning", {
+                        "agent_id": agent.id,
+                        "message": (f"{agent.name}: 出力上限（{req.max_output_tokens} tokens、うち思考 {thinking_tokens} 推定）に達したため、"
+                                    f"上限を2倍にして再生成します")})
+                    prev_partial_id = msg_id
+                    continue
+                if not text.strip():
+                    self._finish_message(ctx, msg_id, text, "failed", {"reason": "truncated", "thinking_tokens": thinking_tokens})
+                    raise TurnFailed(
+                        f"{agent.name}: 思考（Thinking）だけで出力上限 {req.max_output_tokens} tokens を使い切り、本文が生成されませんでした。"
+                        "「API接続」でThinkingの予算を増やすか強度を下げる、または「設定」で上限を上げてください。",
+                        "truncated", agent.id)
             problem = None
             if validator is not None:
                 problem = validator(text)
@@ -197,7 +249,12 @@ class LLMRunner:
                     prev_partial_id = msg_id
                     continue
                 raise QualityFailed(f"品質検証に不合格: {problem}", "quality", agent.id)
-            self._finish_message(ctx, msg_id, text, "completed", {"finish_reason": finish})
+            done_meta = {"finish_reason": finish, "thinking_tokens": thinking_tokens}
+            if truncated:
+                done_meta["truncated"] = True
+                self.bus.publish(ctx.id, "warning", {"agent_id": agent.id, "message_id": msg_id,
+                                                     "message": f"{agent.name}: 出力上限に達したため発言が途中で終わっています"})
+            self._finish_message(ctx, msg_id, text, "completed", done_meta)
             if msg_id:
                 self.bus.publish(ctx.id, "turn.completed", {"agent_id": agent.id, "message_id": msg_id,
                                                              "finish_reason": finish, "tier": choice.tier,
@@ -236,14 +293,45 @@ class LLMRunner:
         err: ProviderError | None = None
         budget_cut = False
         out_est = 0
+        thinking = 0
+        last_think_pub = -1
+        tf = ThinkFilter() if r.profile.reasoning.strip_think_tags else None
+
+        def on_thinking(n: int) -> None:
+            nonlocal thinking, last_think_pub
+            thinking += n
+            # progress only (token count) — the private reasoning text itself is never published
+            if msg_id and (last_think_pub < 0 or thinking - last_think_pub >= 64):
+                last_think_pub = thinking
+                self.bus.publish(ctx.id, "turn.thinking", {"agent_id": agent.id, "message_id": msg_id,
+                                                           "thinking_tokens": thinking})
+
+        def on_visible(t: str) -> None:
+            if not t:
+                return
+            parts.append(t)
+            if msg_id:
+                self.bus.publish(ctx.id, "turn.delta", {"agent_id": agent.id, "message_id": msg_id, "delta": t})
+
         agen = adapter.stream_completion(req, base_url=r.profile.base_url, api_key=api_key)
         try:
             async for ev in agen:
                 if ev.kind == "TEXT_DELTA":
-                    parts.append(ev.text)
                     out_est += estimate_tokens(ev.text)
-                    if msg_id:
-                        self.bus.publish(ctx.id, "turn.delta", {"agent_id": agent.id, "message_id": msg_id, "delta": ev.text})
+                    if tf is not None:
+                        vis, th = tf.feed(ev.text)
+                        if th:
+                            on_thinking(estimate_tokens(th))
+                        on_visible(vis)
+                    else:
+                        on_visible(ev.text)
+                    if self.guard.over_budget_live(r, est_input + out_est):
+                        budget_cut = True
+                        break
+                elif ev.kind == "THINKING_DELTA":
+                    n = estimate_tokens(ev.text)
+                    out_est += n
+                    on_thinking(n)
                     if self.guard.over_budget_live(r, est_input + out_est):
                         budget_cut = True
                         break
@@ -264,12 +352,22 @@ class LLMRunner:
                 await agen.aclose()
             except Exception:  # noqa: BLE001
                 pass
+        if tf is not None:
+            vis, th = tf.flush()
+            if th:
+                on_thinking(estimate_tokens(th))
+            on_visible(vis)
         text = "".join(parts)
+        if tf is not None:
+            text = ThinkFilter.final_clean(text)  # orphan </think> from templates without an opening tag
         if usage is None:
-            usage = Usage(input_tokens=est_input, output_tokens=estimate_tokens(text), source="estimated")
+            usage = Usage(input_tokens=est_input, output_tokens=out_est, reasoning_tokens=thinking or None,
+                          source="estimated")
+        elif usage.reasoning_tokens is None and thinking:
+            usage.reasoning_tokens = min(thinking, usage.output_tokens) if usage.output_tokens else thinking
         if finish is None and err is None and not budget_cut:
             err = ProviderError("stream_cut", "完了イベントなしでストリームが終了しました")
-        return text, usage, finish, err, budget_cut
+        return text, usage, finish, err, budget_cut, thinking
 
     def _record_usage(self, ctx: SessionCtx, agent: AgentConfig, request_id: str, attempt: int, purpose: str,
                       r: Reservation, usage: Usage, s: DebateSettings) -> None:

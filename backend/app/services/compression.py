@@ -53,7 +53,7 @@ class CompressionService:
 
         def build(model: str, max_out: int) -> LLMRequest:
             return LLMRequest(model=model, system=system, messages=[{"role": "user", "content": prompt}],
-                              temperature=0.2, max_output_tokens=min(max_out, cs.summary_target_tokens * 2),
+                              temperature=0.2, max_output_tokens=max_out,
                               timeout_s=ctx.settings.debate.request_timeout_s)
 
         try:

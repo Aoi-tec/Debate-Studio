@@ -26,8 +26,16 @@ export interface Profile {
   billing_family: "openai_claude" | "other_cloud" | "local";
   allow_document_transfer: boolean;
   has_key: boolean | null;
+  max_concurrent_requests: number | null;
+  reasoning: {
+    effort: "provider_default" | "off" | "low" | "medium" | "high";
+    budget_tokens: number | null;
+    context_window_tokens: number | null;
+    strip_think_tags: boolean;
+  };
   quota: {
     mode: "auto" | "manual" | "disabled";
+    scope: "per_agent" | "shared";
     admin_env_var: string | null;
     period_label: string;
     manual_budget_tokens: number | null;

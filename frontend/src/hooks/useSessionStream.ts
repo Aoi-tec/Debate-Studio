@@ -39,7 +39,7 @@ export function useSessionStream(sessionId: string | null) {
         };
         es.onmessage = (m) => handle(m.data);
         const types = [
-          "turn.started", "turn.delta", "turn.completed", "turn.failed", "phase.changed", "usage.updated",
+          "turn.started", "turn.delta", "turn.thinking", "turn.completed", "turn.failed", "phase.changed", "usage.updated",
           "session.started", "session.completed", "session.failed", "session.pause_requested", "session.paused", "session.resumed",
           "checkpoint.started", "checkpoint.reported", "checkpoint.awaiting_user", "checkpoint.decision_received",
           "budget.warning", "budget.exhausted", "quota.refreshed", "quota.unavailable", "model.fallback_started",

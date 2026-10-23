@@ -79,6 +79,10 @@ export function liveReducer(state: LiveState, action: Action): LiveState {
         const msgs = d.messages.map((m) => (m.id === ev.message_id ? { ...m, content: m.content + (ev.delta || "") } : m));
         return { ...next, detail: { ...d, messages: msgs } };
       }
+      if (ev.type === "turn.thinking") {
+        const msgs = d.messages.map((m) => (m.id === ev.message_id ? { ...m, meta: { ...m.meta, thinking_tokens: ev.thinking_tokens } } : m));
+        return { ...next, detail: { ...d, messages: msgs } };
+      }
       if (ev.type === "turn.completed" || ev.type === "turn.failed") {
         const status = ev.type === "turn.completed" ? "completed" : ev.partial ? "incomplete" : "failed";
         const msgs = d.messages.map((m) => (m.id === ev.message_id ? { ...m, status: status as Message["status"], tier: ev.tier ?? m.tier } : m));

@@ -146,3 +146,65 @@ async def test_usage_snapshot_openai_admin(mock):
     assert snap.status == "unavailable"
     snap = await GeminiAdapter().read_usage_snapshot(base_url=None, admin_key="x", start_unix=0)
     assert snap.status == "unavailable", "unsupported providers never report zero usage"
+
+
+async def test_reasoning_params_and_thinking_stream_openai_compat(mock):
+    """Strata-style local server: reasoning_effort sent, reasoning_content is thinking (not answer text)."""
+    seen = mock(lambda r: httpx.Response(200, content=sse(
+        {"choices": [{"delta": {"reasoning_content": "まず前提を…"}}]},
+        {"choices": [{"delta": {"content": "答え"}, "finish_reason": "stop"}]}, done=True)))
+    req = LLMRequest(model="qwen", system="s", messages=[{"role": "user", "content": "q"}], max_output_tokens=5500,
+                     reasoning_effort="medium", thinking_budget=4000)
+    evs = await collect(OpenAICompatibleAdapter(), req, "http://127.0.0.1:8080/v1", key=None)
+    assert [e.kind for e in evs if e.kind in ("THINKING_DELTA", "TEXT_DELTA")] == ["THINKING_DELTA", "TEXT_DELTA"]
+    assert seen["body"]["reasoning_effort"] == "medium" and seen["body"]["max_tokens"] == 5500
+    req_off = LLMRequest(model="qwen", system="s", messages=[{"role": "user", "content": "q"}], reasoning_effort="off")
+    await collect(OpenAICompatibleAdapter(), req_off, "http://127.0.0.1:8080/v1", key=None)
+    assert seen["body"]["reasoning_effort"] == "off"
+    assert seen["body"]["chat_template_kwargs"] == {"enable_thinking": False}
+    await collect(OpenAICompatibleAdapter(), req_off, "https://api.openai.com/v1")
+    assert seen["body"]["reasoning_effort"] == "none" and "chat_template_kwargs" not in seen["body"]
+
+
+async def test_unknown_reasoning_param_is_dropped(mock):
+    calls = []
+
+    def h(r):
+        body = json.loads(r.content)
+        calls.append(body)
+        if "reasoning_effort" in body:
+            return httpx.Response(400, json={"error": "unrecognized field: reasoning_effort"})
+        return httpx.Response(200, content=sse({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}, done=True))
+    mock(h)
+    req = LLMRequest(model="m", system="s", messages=[{"role": "user", "content": "q"}], reasoning_effort="high")
+    evs = await collect(OpenAICompatibleAdapter(), req, "http://localhost:1234/v1", key=None)
+    assert evs[-1].kind == "FINISHED" and "reasoning_effort" not in calls[-1]
+
+
+async def test_context_overflow_is_classified(mock):
+    mock(lambda r: httpx.Response(400, json={"error": "This model's maximum context length is 8192 tokens, requested 9000"}))
+    assert (await collect(OpenAICompatibleAdapter(), REQ))[-1].error.kind == "context_overflow"
+
+
+async def test_anthropic_extended_thinking(mock):
+    seen = mock(lambda r: httpx.Response(200, content=sse(
+        {"type": "message_start", "message": {"usage": {"input_tokens": 5}}},
+        {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "検討…"}},
+        {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "結論"}},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 40}},
+        {"type": "message_stop"})))
+    req = LLMRequest(model="claude", system="s", messages=[{"role": "user", "content": "q"}], temperature=0.7,
+                     max_output_tokens=5500, reasoning_effort="medium", thinking_budget=4000)
+    evs = await collect(AnthropicAdapter(), req)
+    assert seen["body"]["thinking"] == {"type": "enabled", "budget_tokens": 4000}
+    assert "temperature" not in seen["body"] and seen["body"]["max_tokens"] > 4000
+    assert [e.kind for e in evs if e.kind in ("THINKING_DELTA", "TEXT_DELTA")] == ["THINKING_DELTA", "TEXT_DELTA"]
+
+
+async def test_gemini_thinking_budget(mock):
+    seen = mock(lambda r: httpx.Response(200, content=sse(
+        {"candidates": [{"content": {"parts": [{"text": "考え", "thought": True}, {"text": "答"}]}, "finishReason": "STOP"}]})))
+    req = LLMRequest(model="g", system="s", messages=[{"role": "user", "content": "q"}], reasoning_effort="low", thinking_budget=2048)
+    evs = await collect(GeminiAdapter(), req)
+    assert seen["body"]["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 2048}
+    assert [e.kind for e in evs if e.kind in ("THINKING_DELTA", "TEXT_DELTA")] == ["THINKING_DELTA", "TEXT_DELTA"]

@@ -109,8 +109,13 @@ class BudgetGuard:
 
     # ------------------------------------------------------------ pool baselines
     async def snapshot_baselines(self, session_id: str, profiles: list[ApiProfile], settings: DebateSettings,
-                                 registry: ProviderRegistry, secrets: SecretStore) -> list[dict]:
-        """Fix U0 per quota pool at session start. Raises StartRefused when a manual value is required."""
+                                 registry: ProviderRegistry, secrets: SecretStore,
+                                 agents_by_profile: dict[str, list[str]] | None = None) -> list[dict]:
+        """Fix U0 per quota pool at session start. Raises StartRefused when a manual value is required.
+
+        With ``quota.scope == "per_agent"`` one row per (pool, agent) is written so that every
+        agent has an independent allowance instead of all agents draining one shared pool."""
+        agents_by_profile = agents_by_profile or {}
         problems: list[str] = []
         out: list[dict] = []
         seen: set[str] = set()
@@ -152,6 +157,20 @@ class BudgetGuard:
                     reason = snap.detail if snap else "manualモード"
                     problems.append(f"{p.name}: 口座使用量を取得できません（{reason}）。手動予算(manual_budget_tokens)を設定するか、口座閾値を無効にしてください")
                     continue
+            if q.scope == "per_agent":
+                agent_ids = sorted({a for prof in profiles if prof.pool_id == pool for a in agents_by_profile.get(prof.id, [])})
+                n = max(len(agent_ids), 1)
+                for aid in agent_ids:
+                    r2 = dict(row, id=new_id("base"), pool_id=f"{pool}@{aid}")
+                    if row["source"] == "reported":
+                        extra = (row["limit_tokens"] or 0) - (row["u0"] or 0)
+                        r2.update(u0=None, limit_tokens=extra // n, source="reported_per_agent", estimated=1,
+                                  detail=f"口座閾値の追加分 {extra} tokens を {n} 人で等分（Agentごとの枠）")
+                    else:
+                        r2["detail"] = (row["detail"] + "（Agentごとに同じ枠）").strip()
+                    self.db.insert("usage_baselines", r2)
+                    out.append(r2)
+                continue
             self.db.insert("usage_baselines", row)
             out.append(row)
         if problems:
@@ -200,7 +219,8 @@ class BudgetGuard:
                 out = min(out, remaining - est_input)
                 if out < MIN_OUTPUT:
                     return None, f"{tier}: Agent Tier予算到達（使用 {b['used_tokens']}/{b['limit_tokens']}）"
-            proj = self.pool_projection(session_id, profile.pool_id)
+            key = profile.pool_key(agent.id)
+            proj = self.pool_projection(session_id, key)
             if proj["limit"] is not None:
                 if proj["projected"] + est_input + out >= proj["limit"]:
                     room = proj["limit"] - proj["projected"] - est_input - 1
@@ -208,10 +228,10 @@ class BudgetGuard:
                         return None, f"{tier}: API口座の閾値到達（見込み {proj['projected']} / 閾値 {proj['limit']}）"
                     out = min(out, room)
             tokens = est_input + out
-            r = Reservation(new_id("rsv"), session_id, agent.id, tier, profile.pool_id, profile, model, tokens, out)
+            r = Reservation(new_id("rsv"), session_id, agent.id, tier, key, profile, model, tokens, out)
             k = (session_id, agent.id, tier)
             self._inflight_agent[k] = self._inflight_agent.get(k, 0) + tokens
-            self._inflight_pool[profile.pool_id] = self._inflight_pool.get(profile.pool_id, 0) + tokens
+            self._inflight_pool[key] = self._inflight_pool.get(key, 0) + tokens
             self._inflight_session[session_id] = self._inflight_session.get(session_id, 0) + tokens
             self._res[r.id] = r
             return r, ""
@@ -269,10 +289,11 @@ class ModelRouter:
 
     def select(self, *, session_id: str, agent: AgentConfig, profiles: dict[str, ApiProfile], settings: DebateSettings,
                est_input: int, desired_output: int, needs_document_transfer: bool,
-               exclude_tiers: set[str] | None = None) -> RouteChoice:
+               exclude_tiers: set[str] | None = None, boost: float = 1.0) -> RouteChoice:
+        """``desired_output`` is the visible-answer budget; each connection's thinking budget
+        is added on top. ``boost`` (>1) is used when a reply was cut off and is retried."""
         room = self.guard.session_check(session_id, settings, est_input)
-        if room is not None:
-            desired_output = min(desired_output, room)
+        answer = desired_output
         skipped: list[str] = []
         order = [t for t in settings.routing.priority if t in TIERS]
         cands = {t: (p, pid) for t, p, pid in self.tier_profiles(agent, profiles)}
@@ -305,8 +326,17 @@ class ModelRouter:
             if needs_document_transfer and not p.allow_document_transfer:
                 skipped.append(f"{tier}: {p.name} への資料由来データ送信が許可されていません")
                 continue
+            want = int((answer + p.reasoning.thinking_budget) * boost)
+            want = min(want, max(settings.debate.truncation_retry_cap, answer + p.reasoning.thinking_budget))
+            if p.reasoning.context_window_tokens:
+                want = min(want, p.reasoning.context_window_tokens - est_input)
+                if want < min(answer, 512):
+                    skipped.append(f"{tier}: {p.name} のコンテキスト長（{p.reasoning.context_window_tokens}）に入力が収まりません")
+                    continue
+            if room is not None:
+                want = min(want, room)
             r, why = self.guard.try_reserve(session_id=session_id, agent=agent, tier=tier, profile=p, model=model,
-                                            est_input=est_input, desired_output=desired_output)
+                                            est_input=est_input, desired_output=want)
             if r is None:
                 skipped.append(why)
                 continue

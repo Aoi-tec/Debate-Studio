@@ -42,7 +42,12 @@ export function Bubble({ m, agent, idx }: { m: Message; agent?: Agent; idx: numb
         </div>
         <div className={`bubble ${isChair ? "bubble-chair" : ""} ${m.status === "streaming" ? "bubble-streaming" : ""}`}>
           {!isChair && <div className="ctx-label">議長配布コンテキストで討論中{m.packet_refs?.[0] ? `（Packet v${m.packet_refs[0].packet_version}）` : "（資料なし）"}</div>}
-          <div className="bubble-text">{text || (m.status === "streaming" ? "…" : "")}</div>
+          {m.status === "streaming" && !text && (
+            <div className="thinking-note">💭 思考中…{m.meta?.thinking_tokens ? `（約${Number(m.meta.thinking_tokens).toLocaleString("ja-JP")} tokens）` : ""}</div>
+          )}
+          <div className="bubble-text">{text || (m.status === "streaming" ? "" : "")}</div>
+          {m.status !== "streaming" && m.meta?.thinking_tokens ? <div className="muted small">💭 思考 約{Number(m.meta.thinking_tokens).toLocaleString("ja-JP")} tokens（内容は非表示）</div> : null}
+          {m.meta?.truncated && <div className="warn-note">⚠ 出力上限に達したため途中で終わっています</div>}
           {request && (
             <div className="cr-note">
               📮 議長へ追加根拠を要求：{request.question}
@@ -50,7 +55,7 @@ export function Bubble({ m, agent, idx }: { m: Message; agent?: Agent; idx: numb
             </div>
           )}
           {m.meta?.invalid_citations && <div className="warn-note">⚠ 配布Packetにない出典ID: {m.meta.invalid_citations.join(", ")}（未検証）</div>}
-          {statusNote && <div className="status-note">{statusNote}{m.meta?.error ? `：${m.meta.error}` : ""}{m.meta?.reason === "tier_budget_reached" ? "：Tier予算到達で中断" : ""}{m.meta?.problem ? `：${m.meta.problem}` : ""}</div>}
+          {statusNote && <div className="status-note">{statusNote}{m.meta?.error ? `：${m.meta.error}` : ""}{m.meta?.reason === "tier_budget_reached" ? "：Tier予算到達で中断" : ""}{m.meta?.reason === "truncated" ? "：出力上限に到達（上限を広げて再生成）" : ""}{m.meta?.problem ? `：${m.meta.problem}` : ""}</div>}
         </div>
       </div>
     </div>

@@ -229,3 +229,5 @@ a { color: var(--accent); }
   .roles-layout { grid-template-columns: 1fr; }
   .kv { grid-template-columns: 1fr; }
 }
+
+.thinking-note { color: var(--muted); font-size: 12px; font-style: italic; }

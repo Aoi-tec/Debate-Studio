@@ -218,7 +218,13 @@ class DebateController:
         self.set_state(sid, "INITIALIZING", started_at=now_iso())
         self.guard.init_agent_budgets(sid, list(ctx.agents.values()))
         try:
-            await self.guard.snapshot_baselines(sid, list(used_profiles.values()), ctx.settings, self.registry, self.secrets)
+            by_profile: dict[str, list[str]] = {}
+            for a in [ctx.chair] + parts:
+                for _tier, p, _pid in self.runner.router.tier_profiles(a, ctx.profiles):
+                    if p is not None:
+                        by_profile.setdefault(p.id, []).append(a.id)
+            await self.guard.snapshot_baselines(sid, list(used_profiles.values()), ctx.settings, self.registry,
+                                                self.secrets, agents_by_profile=by_profile)
         except StartRefused as e:
             self.set_state(sid, "CREATED", started_at=None)
             raise SessionError(409, "予算の基準値を確定できないため開始を拒否しました", e.problems) from e
@@ -653,6 +659,22 @@ class DebateController:
     # ---------------------------------------------------------------- turns
     async def _participant_turn(self, ctx: SessionCtx, agent: AgentConfig, phase: str, round_: Optional[int],
                                 note: Optional[str] = None) -> Optional[dict]:
+        """One participant turn; on a context-length overflow the shared history is compressed and retried once."""
+        try:
+            return await self._participant_turn_once(ctx, agent, phase, round_, note)
+        except (TurnFailed, BudgetPaused) as e:
+            overflow = (isinstance(e, TurnFailed) and e.kind == "context_overflow") or (
+                isinstance(e, BudgetPaused) and any("コンテキスト長" in r for r in e.reasons))
+            if not overflow:
+                raise
+            self.bus.publish(ctx.id, "warning", {"agent_id": agent.id,
+                                                 "message": f"{agent.name}: 入力がモデルのコンテキスト長を超えたため、古い履歴を要約して再試行します"})
+            self.mutate(ctx.id, lambda x: x.__setitem__("compress_requested", True))
+            await self._round_end_compression(ctx)
+            return await self._participant_turn_once(ctx, agent, phase, round_, note)
+
+    async def _participant_turn_once(self, ctx: SessionCtx, agent: AgentConfig, phase: str, round_: Optional[int],
+                                     note: Optional[str] = None) -> Optional[dict]:
         sid = ctx.id
         packet = self.packets.current(sid, agent.id)
         if packet is None and self.packets.latest_any(sid, agent.id) is not None:

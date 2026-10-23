@@ -43,8 +43,8 @@ async def _route_all(e, routing: dict, budgets: dict, chair_too=False):
 async def test_u0_threshold_fixed_at_start_and_refusals(env_factory):
     async with env_factory() as e:
         e.script.usage_snapshot_tokens = 12_000
-        await _profiles(e, [_fake_profile("api_oa", "OA-like", "openai_claude", {"mode": "auto"}),
-                            _fake_profile("api_oc", "Other cloud", "other_cloud", {"mode": "auto"})])
+        await _profiles(e, [_fake_profile("api_oa", "OA-like", "openai_claude", {"mode": "auto", "scope": "shared"}),
+                            _fake_profile("api_oc", "Other cloud", "other_cloud", {"mode": "auto", "scope": "shared"})])
         await _route_all(e, {"primary_cloud": "api_oa", "downstream_cloud": "api_oc"}, {})
         sid = await e.new_session()
         r = await e.client.post(f"/api/sessions/{sid}/start")
@@ -141,10 +141,14 @@ async def test_session_hard_limit_is_not_bypassed_by_fallback(env_factory):
         await e.c.debate.wait_idle(sid)
         s = await e.session(sid)
         assert s["state"] == "PAUSED_BUDGET" and s["usage"]["total_tokens"] <= 3000
-        n = len(e.script.calls)
-        await e.client.post(f"/api/sessions/{sid}/resume")
-        await e.c.debate.wait_idle(sid)
-        assert len(e.script.calls) == n, "no new generation once the hard limit has no room left"
+        counts = []
+        for _ in range(4):  # repeated resumes: total stays under the hard limit and calls stop growing
+            await e.client.post(f"/api/sessions/{sid}/resume")
+            await e.c.debate.wait_idle(sid)
+            s = await e.session(sid)
+            assert s["state"] == "PAUSED_BUDGET" and s["usage"]["total_tokens"] <= 3000
+            counts.append(len(e.script.calls))
+        assert counts[-1] == counts[-2], "no new generation once the hard limit has no room left"
 
 
 async def test_shared_pool_reservations_are_atomic(tmp_path):
@@ -152,7 +156,8 @@ async def test_shared_pool_reservations_are_atomic(tmp_path):
     db = Database(tmp_path / "x.sqlite3")
     meter = UsageMeter(db)
     g = BudgetGuard(db, meter)
-    p = ApiProfile(id="api_x", name="x", protocol="fake", default_model="m", quota={"mode": "manual", "quota_pool_id": "pool1"})
+    p = ApiProfile(id="api_x", name="x", protocol="fake", default_model="m",
+                   quota={"mode": "manual", "quota_pool_id": "pool1", "scope": "shared"})
     db.insert("usage_baselines", {"id": "b1", "session_id": "s1", "pool_id": "pool1", "profile_id": "api_x", "family": "other_cloud",
                                   "period": "", "u0": 0, "limit_tokens": 1000, "source": "manual", "fetched_at": "2000-01-01T00:00:00Z",
                                   "estimated": 1, "detail": ""})
@@ -233,3 +238,116 @@ async def test_packet_bodies_match_contract(env_factory):
         for p in (await e.client.get(f"/api/sessions/{sid}/context-packets")).json()["packets"]:
             body = p["body"]
             assert set(schema["required"]) <= set(body) <= set(schema["properties"])
+
+
+async def test_per_agent_pools_are_independent(env_factory):
+    """Default scope=per_agent: each agent has its own allowance on a shared connection (e.g. Strata)."""
+    async with env_factory() as e:
+        await _profiles(e, [_fake_profile("api_s", "Shared server", "other_cloud",
+                                          {"mode": "manual", "manual_budget_tokens": 6000})])
+        await _route_all(e, {"primary_cloud": "api_s"}, {}, chair_too=True)
+        # agent_a talks a lot and exhausts *its own* allowance only
+        e.script.add("長い発言。" * 900, times=10, agent_id="agent_a")
+        sid = await e.new_session()
+        s = await e.start_and_idle(sid)
+        rows = {b["pool_id"]: b for b in s["baselines"]}
+        assert {"api_s@agent_a", "api_s@agent_b", "api_s@agent_c", "api_s@agent_chair"} <= set(rows)
+        assert all(r["limit_tokens"] == 6000 for r in rows.values())
+        used = {r["pool_id"]: r["t"] for r in e.c.db.all(
+            "SELECT pool_id, SUM(input_tokens+output_tokens) t FROM usage_records WHERE session_id=? GROUP BY pool_id", (sid,))}
+        assert set(used) <= set(rows), "usage is recorded against the agent's own pool"
+        assert used["api_s@agent_b"] < 6000 and used["api_s@agent_a"] <= 6000
+        # b and c were never blocked by a's consumption
+        ok = {m["agent_id"] for m in s["messages"] if m["phase"] == "INDEPENDENT" and m["status"] == "completed"}
+        assert {"agent_b", "agent_c"} <= ok
+
+
+async def test_per_connection_concurrency_limit(env_factory):
+    """max_concurrent_requests=1 → a local server gets one agent at a time (full context each)."""
+    async with env_factory() as e:
+        e.script.delay_s = 0.002
+        p = _fake_profile("api_local", "Local single slot", "local")
+        p["max_concurrent_requests"] = 1
+        await _profiles(e, [p])
+        await _route_all(e, {"primary_cloud": "api_local"}, {})
+        sid = await e.new_session()
+        await e.start_and_idle(sid)
+        evs = [ev for ev in e.events(sid) if ev["type"] in ("turn.started", "turn.completed") and ev.get("phase") in (None, "INDEPENDENT")]
+        live, peak = 0, 0
+        ind = {ev["message_id"] for ev in e.events(sid) if ev["type"] == "turn.started" and ev.get("phase") == "INDEPENDENT"}
+        for ev in e.events(sid):
+            if ev.get("message_id") in ind:
+                live += 1 if ev["type"] == "turn.started" else (-1 if ev["type"] == "turn.completed" else 0)
+                peak = max(peak, live)
+        assert peak == 1, "independent proposals are serialized on a single-slot connection"
+
+
+async def test_thinking_budget_added_and_truncation_retried(env_factory):
+    async with env_factory() as e:
+        p = _fake_profile("api_think", "Thinking local", "local")
+        p["reasoning"] = {"effort": "medium", "budget_tokens": 1000}
+        await _profiles(e, [p])
+        await _route_all(e, {"primary_cloud": "api_think"}, {}, chair_too=True)
+        # first attempt: thinking alone overflows the cap → cut off → retried with 2x cap → answer arrives
+        e.script.add({"thinking": "考" * 2400, "text": "結論です。"}, times=2, agent_id="agent_a", phase="INDEPENDENT")
+        sid = await e.new_session()
+        s = await e.start_and_idle(sid)
+        assert s["state"] == "WAITING_USER_DECISION", s["blockers"]
+        a_calls = [c for c in e.calls("turn", "agent_a") if c["meta"].get("phase") == "INDEPENDENT"]
+        assert a_calls[0]["payload"]["max_output_tokens"] == 1500 + 1000, "answer budget + thinking budget"
+        assert a_calls[0]["reasoning_effort"] == "medium" and a_calls[0]["thinking_budget"] == 1000
+        assert a_calls[1]["payload"]["max_output_tokens"] == 2 * (1500 + 1000)
+        msgs = [m for m in s["messages"] if m["agent_id"] == "agent_a" and m["phase"] == "INDEPENDENT"]
+        assert [m["status"] for m in msgs] == ["incomplete", "completed"]
+        assert msgs[-1]["content"] == "結論です。" and msgs[-1]["meta"]["thinking_tokens"] >= 2400
+        evs = e.events(sid)
+        th = [ev for ev in evs if ev["type"] == "turn.thinking"]
+        assert th and all("delta" not in ev and "text" not in ev for ev in th), "only token counts, never thinking text"
+        assert not any("考考考" in json_dumps(c["payload"]) for c in e.calls() if c["meta"].get("agent_id") != "agent_a")
+
+
+async def test_inline_think_tags_are_stripped(env_factory):
+    async with env_factory() as e:
+        e.script.add("<think>内部の推論メモSECRET</think>公開する意見です。", agent_id="agent_b", phase="INDEPENDENT")
+        e.script.add("前置き推論ORPHAN</think>本文のみ。", agent_id="agent_c", phase="INDEPENDENT")
+        sid = await e.new_session()
+        s = await e.start_and_idle(sid)
+        b = next(m for m in s["messages"] if m["agent_id"] == "agent_b" and m["phase"] == "INDEPENDENT")
+        c = next(m for m in s["messages"] if m["agent_id"] == "agent_c" and m["phase"] == "INDEPENDENT")
+        assert b["content"] == "公開する意見です。" and c["content"] == "本文のみ。"
+        for call in e.calls():
+            blob = json_dumps(call["payload"])
+            assert "SECRET" not in blob and "ORPHAN" not in blob, "private reasoning never reaches other agents"
+        assert not any("SECRET" in ev.get("delta", "") for ev in e.events(sid))
+
+
+def test_settings_migration_raises_old_800_default(tmp_path):
+    import json as _j
+    from app.storage.config_store import ConfigStore
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    old = DebateSettings().model_dump()
+    old.pop("settings_version")
+    old["debate"]["max_output_tokens"] = 800
+    (cfg / "debate_settings.json").write_text(_j.dumps(old), encoding="utf-8")
+    st = ConfigStore(cfg, tmp_path / "roles").settings()
+    assert st.debate.max_output_tokens == 1500 and st.settings_version == 2
+
+
+def json_dumps(x):
+    import json as _j
+    return _j.dumps(x, ensure_ascii=False)
+
+
+async def test_context_overflow_compresses_and_retries(env_factory):
+    async with env_factory() as e:
+        st = e.c.config.settings()
+        st.compression.keep_recent_messages = 2
+        e.c.config.save_settings(st)
+        e.script.add({"error": "context_overflow", "message": "maximum context length exceeded"}, agent_id="agent_a", phase="DEBATE")
+        sid = await e.new_session()
+        s = await e.start_and_idle(sid)
+        assert s["state"] == "WAITING_USER_DECISION", s["blockers"]
+        assert e.c.db.all("SELECT * FROM context_summaries WHERE session_id=?", (sid,)), "history compressed before retry"
+        a = [m for m in s["messages"] if m["agent_id"] == "agent_a" and m["phase"] == "DEBATE"]
+        assert a[0]["status"] == "failed" and a[1]["status"] == "completed"

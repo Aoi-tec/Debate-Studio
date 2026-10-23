@@ -36,7 +36,13 @@ class AnthropicAdapter(ProviderAdapter):
             "max_tokens": req.max_output_tokens,
             "stream": True,
         }
-        if req.temperature is not None:
+        eff = req.reasoning_effort
+        if eff and eff not in ("provider_default", "off") and req.thinking_budget > 0:
+            # extended thinking: budget >= 1024 and strictly below max_tokens; temperature must stay default
+            budget = max(1024, req.thinking_budget)
+            body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            body["max_tokens"] = max(req.max_output_tokens, budget + 1024)
+        elif req.temperature is not None:
             body["temperature"] = min(req.temperature, 1.0)
         try:
             async with _pb.client(timeout_for(req)) as client:
@@ -62,6 +68,8 @@ class AnthropicAdapter(ProviderAdapter):
                             d = obj.get("delta") or {}
                             if d.get("type") == "text_delta" and d.get("text"):
                                 yield LLMEvent("TEXT_DELTA", text=d["text"])
+                            elif d.get("type") == "thinking_delta" and d.get("thinking"):
+                                yield LLMEvent("THINKING_DELTA", text=d["thinking"])
                         elif t == "message_delta":
                             stop = (obj.get("delta") or {}).get("stop_reason") or stop
                             u = obj.get("usage") or {}

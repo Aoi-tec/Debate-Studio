@@ -25,7 +25,8 @@ export default function SettingsPage() {
       <div className="form-grid">
         {num("debate", "debate_rounds", "既定の討論ラウンド")}
         {num("debate", "max_parallel_requests", "独立提案の並列数")}
-        {num("debate", "max_output_tokens", "1発言の最大出力tokens")}
+        {num("debate", "max_output_tokens", "1発言の本文の上限tokens（思考分は接続ごとに加算）")}
+        {num("debate", "truncation_retry_cap", "途切れた時の再生成で広げる上限tokens")}
         {num("debate", "request_timeout_s", "応答タイムアウト(秒)")}
         {num("debate", "max_retries", "再試行回数(429/5xx)")}
         {num("debate", "max_agents", "Agent数の上限")}

@@ -29,6 +29,9 @@ class GeminiAdapter(ProviderAdapter):
             gen["temperature"] = req.temperature
         if req.json_mode:
             gen["responseMimeType"] = "application/json"
+        eff = req.reasoning_effort
+        if eff and eff != "provider_default":
+            gen["thinkingConfig"] = {"thinkingBudget": 0 if eff == "off" else req.thinking_budget}
         body = {"systemInstruction": {"parts": [{"text": req.system}]}, "contents": contents, "generationConfig": gen}
         url = f"{base}/models/{quote(req.model, safe='')}:streamGenerateContent?alt=sse"
         try:
@@ -48,7 +51,9 @@ class GeminiAdapter(ProviderAdapter):
                             return
                         for cand in obj.get("candidates") or []:
                             for part in (cand.get("content") or {}).get("parts") or []:
-                                if part.get("text") and not part.get("thought"):
+                                if part.get("text") and part.get("thought"):
+                                    yield LLMEvent("THINKING_DELTA", text=part["text"])
+                                elif part.get("text"):
                                     yield LLMEvent("TEXT_DELTA", text=part["text"])
                             if cand.get("finishReason"):
                                 finish = cand["finishReason"]

@@ -14,8 +14,11 @@ import httpx
 
 from app.core.redact import redact
 
-EventKind = Literal["START", "TEXT_DELTA", "USAGE", "FINISHED", "ERROR"]
-ErrorKind = Literal["auth", "rate_limit", "transient", "bad_request", "timeout", "stream_cut", "unsupported", "config"]
+EventKind = Literal["START", "TEXT_DELTA", "THINKING_DELTA", "USAGE", "FINISHED", "ERROR"]
+ErrorKind = Literal["auth", "rate_limit", "transient", "bad_request", "timeout", "stream_cut", "unsupported", "config",
+                    "context_overflow"]
+# finish reasons meaning "the output cap was hit" across vendors
+TRUNCATED_FINISH = {"length", "max_tokens", "MAX_TOKENS", "max_output_tokens", "incomplete"}
 
 
 @dataclass
@@ -63,6 +66,9 @@ class LLMRequest:
     max_output_tokens: int = 800
     timeout_s: float = 120.0
     json_mode: bool = False
+    # thinking control (set by the runner from the connection's ReasoningConfig)
+    reasoning_effort: Optional[str] = None  # None/provider_default → send nothing
+    thinking_budget: int = 0  # tokens reserved for thinking inside max_output_tokens
     metadata: dict[str, Any] = field(default_factory=dict)  # NOT sent to vendors
 
     def to_audit_dict(self) -> dict:
@@ -102,6 +108,10 @@ def http_error(resp: httpx.Response, body: str) -> ProviderError:
         except ValueError:
             retry_after = None
     msg = f"HTTP {st}: {body[:300]}"
+    low = body.lower()
+    if st in (400, 413, 422) and ("context" in low or "prompt is too long" in low or "too many tokens" in low) and (
+            "length" in low or "window" in low or "exceed" in low or "too long" in low or "maximum" in low):
+        return ProviderError("context_overflow", msg, st)
     if st in (401, 403):
         return ProviderError("auth", msg, st)
     if st == 429:
@@ -173,3 +183,56 @@ def map_transport_error(e: Exception) -> ProviderError:
     if isinstance(e, httpx.ConnectError):
         return ProviderError("transient", f"接続できません: {type(e).__name__}")
     return ProviderError("transient", f"{type(e).__name__}: {e}")
+
+
+class ThinkFilter:
+    """Streams visible text while removing inline ``<think>…</think>`` blocks.
+
+    Qwen/DeepSeek-style servers sometimes put the model's private reasoning inside
+    the normal content. That text must not be shown nor passed to other agents
+    (DESIGN 3.1: internal reasoning is not displayed). Feed chunks with ``feed``;
+    it returns (visible, thinking). ``final_clean`` handles an orphan ``</think>``
+    (templates that omit the opening tag).
+    """
+
+    OPEN, CLOSE = "<think>", "</think>"
+
+    def __init__(self) -> None:
+        self.inside = False
+        self.buf = ""
+
+    def feed(self, chunk: str) -> tuple[str, str]:
+        self.buf += chunk
+        vis, think = [], []
+        while self.buf:
+            tag = self.CLOSE if self.inside else self.OPEN
+            i = self.buf.find(tag)
+            if i >= 0:
+                (think if self.inside else vis).append(self.buf[:i])
+                self.buf = self.buf[i + len(tag):]
+                self.inside = not self.inside
+                continue
+            # keep a possible partial tag at the end of the buffer
+            keep = 0
+            for k in range(min(len(tag) - 1, len(self.buf)), 0, -1):
+                if tag.startswith(self.buf[-k:]):
+                    keep = k
+                    break
+            out, self.buf = self.buf[:len(self.buf) - keep], self.buf[len(self.buf) - keep:]
+            (think if self.inside else vis).append(out)
+            break
+        return "".join(vis), "".join(think)
+
+    def flush(self) -> tuple[str, str]:
+        rest, self.buf = self.buf, ""
+        return ("", rest) if self.inside else (rest, "")
+
+    @classmethod
+    def final_clean(cls, text: str) -> str:
+        if cls.CLOSE in text and cls.OPEN not in text:
+            text = text.split(cls.CLOSE, 1)[1]
+        while cls.OPEN in text:
+            a = text.find(cls.OPEN)
+            b = text.find(cls.CLOSE, a)
+            text = text[:a] + ("" if b < 0 else text[b + len(cls.CLOSE):])
+        return text.strip()

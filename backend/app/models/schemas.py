@@ -32,6 +32,9 @@ class QuotaConfig(BaseModel):
     """Account-level usage threshold settings (DESIGN 7A.3)."""
 
     mode: Literal["auto", "manual", "disabled"] = "disabled"
+    # per_agent: every agent gets its own allowance on this connection (default)
+    # shared   : all agents draw from one pool (matches a cloud account's real shared limit)
+    scope: Literal["per_agent", "shared"] = "per_agent"
     admin_env_var: Optional[str] = None  # separate admin credential for usage API
     period_label: str = "当月（UTC暦月）"
     manual_budget_tokens: Optional[int] = Field(default=None, ge=0)
@@ -44,6 +47,29 @@ class QuotaConfig(BaseModel):
         if v is not None and not _ENV_RE.match(v):
             raise ValueError("admin_env_var must be an UPPER_SNAKE env var name")
         return v
+
+
+ReasoningEffort = Literal["provider_default", "off", "low", "medium", "high"]
+DEFAULT_THINKING_BUDGET = {"provider_default": 4096, "off": 0, "low": 2048, "medium": 4096, "high": 8192}
+
+
+class ReasoningConfig(BaseModel):
+    """Thinking / reasoning control per connection.
+
+    The request's total output cap = answer tokens (DebateParams.max_output_tokens)
+    + thinking budget, so thinking never starves the visible answer.
+    """
+
+    effort: ReasoningEffort = "provider_default"
+    budget_tokens: Optional[int] = Field(default=None, ge=0, le=128_000)  # None → derived from effort
+    context_window_tokens: Optional[int] = Field(default=None, ge=1024, le=4_000_000)
+    strip_think_tags: bool = True  # remove inline <think>…</think> (Qwen/DeepSeek style) from the visible text
+
+    @property
+    def thinking_budget(self) -> int:
+        if self.effort == "off":
+            return 0
+        return self.budget_tokens if self.budget_tokens is not None else DEFAULT_THINKING_BUDGET[self.effort]
 
 
 class QualityStatus(BaseModel):
@@ -65,6 +91,7 @@ class ApiProfile(BaseModel):
     allow_document_transfer: bool = False  # may attachment-derived text be sent here?
     quota: QuotaConfig = Field(default_factory=QuotaConfig)
     quality: QualityStatus = Field(default_factory=QualityStatus)
+    reasoning: ReasoningConfig = Field(default_factory=ReasoningConfig)
 
     @field_validator("id")
     @classmethod
@@ -87,9 +114,15 @@ class ApiProfile(BaseModel):
             raise ValueError("base_url must start with http:// or https://")
         return v.rstrip("/")
 
+    max_concurrent_requests: Optional[int] = Field(default=None, ge=1, le=64)  # None = no limit
+
     @property
     def pool_id(self) -> str:
         return self.quota.quota_pool_id or self.id
+
+    def pool_key(self, agent_id: str) -> str:
+        """Budget pool used by ``agent_id`` on this connection."""
+        return self.pool_id if self.quota.scope == "shared" else f"{self.pool_id}@{agent_id}"
 
 
 class ApiProfileCreate(BaseModel):
@@ -101,6 +134,8 @@ class ApiProfileCreate(BaseModel):
     requires_key: bool = True
     billing_family: BillingFamily = "other_cloud"
     allow_document_transfer: bool = False
+    reasoning: Optional[ReasoningConfig] = None
+    max_concurrent_requests: Optional[int] = Field(default=None, ge=1, le=64)
 
 
 class ApiProfilePatch(BaseModel):
@@ -111,6 +146,8 @@ class ApiProfilePatch(BaseModel):
     enabled: Optional[bool] = None
     billing_family: Optional[BillingFamily] = None
     allow_document_transfer: Optional[bool] = None
+    reasoning: Optional[ReasoningConfig] = None
+    max_concurrent_requests: Optional[int] = Field(default=None, ge=1, le=64)
 
 
 class SecretPut(BaseModel):
@@ -234,7 +271,10 @@ class CompressionSettings(BaseModel):
 class DebateParams(BaseModel):
     debate_rounds: int = Field(default=2, ge=1, le=20)
     max_parallel_requests: int = Field(default=3, ge=1, le=10)
-    max_output_tokens: int = Field(default=800, ge=64, le=32000)
+    # visible answer tokens per turn; the thinking budget of the connection is added on top
+    max_output_tokens: int = Field(default=1500, ge=64, le=32000)
+    # when a reply is cut off (finish_reason=length) it is retried once with a doubled cap up to this value
+    truncation_retry_cap: int = Field(default=32000, ge=256, le=200_000)
     temperature: float = Field(default=0.7, ge=0, le=2)
     max_agents: int = Field(default=10, ge=4, le=30)
     request_timeout_s: float = Field(default=120, ge=5)
@@ -262,6 +302,7 @@ class PriceEntry(BaseModel):
 
 
 class DebateSettings(BaseModel):
+    settings_version: int = 2
     checkpoint: CheckpointSettings = Field(default_factory=CheckpointSettings)
     routing: RoutingSettings = Field(default_factory=RoutingSettings)
     compression: CompressionSettings = Field(default_factory=CompressionSettings)
